@@ -2,7 +2,7 @@
 
 # PickleCryptor
 
-A simple library for serializing / compressing / encrypting Python objects all in one function.
+A simple library for serializing / compressing / encrypting Python objects all in two functions on one object.
 
 # Installation
 ```
@@ -21,9 +21,9 @@ b'{\xa9\xbc\x8e]N\xf1\xa1\xefk\xeb5\x99\\\xd1\xca\x01\x8d6\x81\x12 \x80\xeew=\xe
 {'a': 'hi'}
 ```
 
-In this example we create a PickleCryptor object that will use the given password for encryption/decryption. Using the default params for the encryption/compression parameters leads to AES ECB encryption along winh zlib compression using it's default setting.
+In this example we create a PickleCryptor object that will use the given password for encryption/decryption. Using the default params for the encryption/compression parameters leads to AES ECB encryption along with zlib compression.
 
-Some non-default types of compression and encryption are natively supported. Check the docs for more information.
+Some other types of compression and encryption are natively supported. Just pass in the enum values corresponding with what you'd like to `PickleCryptor`. Check the docs for more information.
 
 See [https://csm10495.github.io/picklecryptor/](https://csm10495.github.io/picklecryptor/) for full API documentation.
 

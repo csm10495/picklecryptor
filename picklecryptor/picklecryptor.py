@@ -2,8 +2,9 @@
 The main implementation file for PickleCryptor
 '''
 
-import base64
+import bz2
 import enum
+import gzip
 import pickle
 import typing
 import zlib
@@ -13,7 +14,7 @@ from Crypto.Util.Padding import pad, unpad
 
 class EncryptionType(enum.Enum):
     ''' Enum representing the types of encryption PickleCryptor can perform '''
-    NONE = enum.auto() #: Use no encryption
+    NONE = enum.auto()
     AES_ECB = enum.auto()
     SALSA_20 = enum.auto()
 
@@ -24,6 +25,10 @@ class CompressionType(enum.Enum):
     ZLIB_BEST_SPEED = enum.auto()
     ZLIB_BEST_COMPRESSION = enum.auto()
     ZLIB_NO_COMPRESSION = enum.auto()
+    BZ2_MOST_COMPRESSION = enum.auto()
+    BZ2_LEAST_COMPRESSION = enum.auto()
+    GZIP_MOST_COMPRESSION = enum.auto()
+    GZIP_LEAST_COMPRESSION = enum.auto()
 
 def _repeat_to_length(string_to_expand: typing.Union[bytes, str], length:int) -> typing.Union[bytes, str]:
     ''' Repeats the given string to get to the given length '''
@@ -136,6 +141,14 @@ class PickleCryptor:
             data = zlib.compress(data, zlib.Z_BEST_COMPRESSION)
         elif self._compression == CompressionType.ZLIB_NO_COMPRESSION:
             data = zlib.compress(data, zlib.Z_NO_COMPRESSION)
+        elif self._compression == CompressionType.BZ2_MOST_COMPRESSION:
+            data = bz2.compress(data, 9)
+        elif self._compression == CompressionType.BZ2_LEAST_COMPRESSION:
+            data = bz2.compress(data, 1)
+        elif self._compression == CompressionType.GZIP_MOST_COMPRESSION:
+            data = gzip.compress(data, 9)
+        elif self._compression == CompressionType.GZIP_LEAST_COMPRESSION:
+            data = gzip.compress(data, 1)
         else:
             raise ValueError(f"Unsupported compression type: {self._compression}")
 
@@ -155,6 +168,12 @@ class PickleCryptor:
                                    CompressionType.ZLIB_BEST_COMPRESSION,
                                    CompressionType.ZLIB_NO_COMPRESSION):
             data = zlib.decompress(data)
+        elif self._compression in (CompressionType.BZ2_MOST_COMPRESSION,
+                                   CompressionType.BZ2_LEAST_COMPRESSION):
+            data = bz2.decompress(data)
+        elif self._compression in (CompressionType.GZIP_MOST_COMPRESSION,
+                                   CompressionType.GZIP_LEAST_COMPRESSION):
+            data = gzip.decompress(data)
         else:
             raise ValueError(f"Unsupported compression type: {self._compression}")
 
