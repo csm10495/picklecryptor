@@ -38,14 +38,18 @@ import pickle
 import typing
 import zlib
 
-from Crypto.Cipher import AES, Salsa20
+from Crypto.Cipher import AES, ChaCha20, Salsa20
 from Crypto.Util.Padding import pad, unpad
+from Crypto.Random import get_random_bytes
 
 class EncryptionType(enum.Enum):
     &#39;&#39;&#39; Enum representing the types of encryption PickleCryptor can perform &#39;&#39;&#39;
     NONE = enum.auto()
     AES_ECB = enum.auto()
     SALSA_20 = enum.auto()
+    CHACHA_20_ORIGINAL = enum.auto()
+    CHACHA_20_TLS = enum.auto()
+    XCHACHA_20 = enum.auto()
 
 class CompressionType(enum.Enum):
     &#39;&#39;&#39; Enum representing the types of compression PickleCryptor can perform &#39;&#39;&#39;
@@ -62,6 +66,14 @@ class CompressionType(enum.Enum):
 def _repeat_to_length(string_to_expand: typing.Union[bytes, str], length:int) -&gt; typing.Union[bytes, str]:
     &#39;&#39;&#39; Repeats the given string to get to the given length &#39;&#39;&#39;
     return (string_to_expand * (int(length / len(string_to_expand)) + 1))[:length]
+
+def _coerce_to_list(thing:typing.Any):
+    &#39;&#39;&#39; Takes the given object and returns it if iterable, else returns a list with the thing in it &#39;&#39;&#39;
+    try:
+        iter(thing)
+        return thing
+    except TypeError:
+        return [thing]
 
 class PickleCryptor:
     def __init__(self,
@@ -92,20 +104,25 @@ class PickleCryptor:
         self._pickle_module = pickle_module
         self._compression = compression
 
-        encryption_module = None
+        self._encryption_module = None
         if self._encryption == EncryptionType.AES_ECB:
-            encryption_module = AES
+            self._encryption_module = AES
         elif self._encryption == EncryptionType.SALSA_20:
-            encryption_module = Salsa20
+            self._encryption_module = Salsa20
+        elif self._encryption in (EncryptionType.CHACHA_20_ORIGINAL,
+                                  EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.XCHACHA_20):
+            self._encryption_module = ChaCha20
 
-        if encryption_module:
-            for possible_block_size in [k for k in getattr(encryption_module, &#39;key_size&#39;) if k % getattr(encryption_module, &#39;block_size&#39;, 1) == 0]:
+
+        if self._encryption_module :
+            for possible_block_size in [k for k in _coerce_to_list(getattr(self._encryption_module , &#39;key_size&#39;)) if k % getattr(self._encryption_module , &#39;block_size&#39;, 1) == 0]:
                 if len(self._password) &lt;= possible_block_size:
                     self._encryption_block_size = possible_block_size
                     self._password = _repeat_to_length(self._password, self._encryption_block_size)
                     break
             else:
-                raise ValueError(f&#34;For {encryption.name} encryption, the password was too long. It could not fit in a supported key size. Max key size: {max(AES.key_size)}. It&#39;s size was: {len(self._password)}.&#34;)
+                raise ValueError(f&#34;For {encryption.name} encryption, the password was too long. It could not fit in a supported key size. Max key size: {max(self._encryption_module.key_size)}. It&#39;s size was: {len(self._password)}.&#34;)
 
         # this must be done after self._password is fully setup
         if self._encryption == EncryptionType.AES_ECB:
@@ -115,6 +132,20 @@ class PickleCryptor:
         &#39;&#39;&#39; Takes in the given data field and with raise TypeError if it is not a bytes object &#39;&#39;&#39;
         if not isinstance(data, bytes):
             raise TypeError(f&#34;data should be of type bytes. It is of type: {type(data)}&#34;)
+
+    def _get_nonce_length(self) -&gt; typing.Optional[int]:
+        &#39;&#39;&#39; Uses self._encryption to figure out the nonce size &#39;&#39;&#39;
+        nonce_length = None
+        if self._encryption == EncryptionType.SALSA_20:
+            nonce_length = 8
+        elif self._encryption == EncryptionType.CHACHA_20_ORIGINAL:
+            nonce_length = 8
+        elif self._encryption == EncryptionType.CHACHA_20_TLS:
+            nonce_length = 12
+        elif self._encryption == EncryptionType.XCHACHA_20:
+            nonce_length = 24
+
+        return nonce_length
 
     def _encrypt(self, data:bytes) -&gt; bytes:
         &#39;&#39;&#39;
@@ -130,6 +161,12 @@ class PickleCryptor:
         elif self._encryption == EncryptionType.SALSA_20:
             cipher = Salsa20.new(key=self._password)
             data = cipher.nonce + cipher.encrypt(data)
+        elif self._encryption in (EncryptionType.CHACHA_20_ORIGINAL,
+                                  EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.XCHACHA_20):
+            nonce = get_random_bytes(self._get_nonce_length())
+            cipher = ChaCha20.new(key=self._password, nonce=nonce)
+            data = nonce + cipher.encrypt(data)
         else:
             raise ValueError(f&#34;Unsupported encryption type: {self._encryption}&#34;)
         return data
@@ -145,10 +182,14 @@ class PickleCryptor:
             pass
         elif self._encryption == EncryptionType.AES_ECB:
             data = unpad(self._aes.decrypt(data), self._encryption_block_size)
-        elif self._encryption == EncryptionType.SALSA_20:
-            nonce = data[:8]
-            secret = data[8:]
-            data = Salsa20.new(self._password, nonce).decrypt(secret)
+        elif self._encryption in (EncryptionType.SALSA_20,
+                                  EncryptionType.CHACHA_20_ORIGINAL,
+                                  EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.XCHACHA_20):
+            nonce_length = self._get_nonce_length()
+            nonce = data[:nonce_length]
+            secret = data[nonce_length:]
+            data = self._encryption_module.new(key=self._password, nonce=nonce).decrypt(secret)
         else:
             raise ValueError(f&#34;Unsupported encryption type: {self._encryption}&#34;)
         return data
@@ -328,7 +369,10 @@ if __name__ == &#39;__main__&#39;:
     &#39;&#39;&#39; Enum representing the types of encryption PickleCryptor can perform &#39;&#39;&#39;
     NONE = enum.auto()
     AES_ECB = enum.auto()
-    SALSA_20 = enum.auto()</code></pre>
+    SALSA_20 = enum.auto()
+    CHACHA_20_ORIGINAL = enum.auto()
+    CHACHA_20_TLS = enum.auto()
+    XCHACHA_20 = enum.auto()</code></pre>
 </details>
 <h3>Ancestors</h3>
 <ul class="hlist">
@@ -340,11 +384,23 @@ if __name__ == &#39;__main__&#39;:
 <dd>
 <div class="desc"></div>
 </dd>
+<dt id="picklecryptor.picklecryptor.EncryptionType.CHACHA_20_ORIGINAL"><code class="name">var <span class="ident">CHACHA_20_ORIGINAL</span></code></dt>
+<dd>
+<div class="desc"></div>
+</dd>
+<dt id="picklecryptor.picklecryptor.EncryptionType.CHACHA_20_TLS"><code class="name">var <span class="ident">CHACHA_20_TLS</span></code></dt>
+<dd>
+<div class="desc"></div>
+</dd>
 <dt id="picklecryptor.picklecryptor.EncryptionType.NONE"><code class="name">var <span class="ident">NONE</span></code></dt>
 <dd>
 <div class="desc"></div>
 </dd>
 <dt id="picklecryptor.picklecryptor.EncryptionType.SALSA_20"><code class="name">var <span class="ident">SALSA_20</span></code></dt>
+<dd>
+<div class="desc"></div>
+</dd>
+<dt id="picklecryptor.picklecryptor.EncryptionType.XCHACHA_20"><code class="name">var <span class="ident">XCHACHA_20</span></code></dt>
 <dd>
 <div class="desc"></div>
 </dd>
@@ -396,20 +452,25 @@ pickle_module: The serialization module to use. Must have .dumps and .loads meth
         self._pickle_module = pickle_module
         self._compression = compression
 
-        encryption_module = None
+        self._encryption_module = None
         if self._encryption == EncryptionType.AES_ECB:
-            encryption_module = AES
+            self._encryption_module = AES
         elif self._encryption == EncryptionType.SALSA_20:
-            encryption_module = Salsa20
+            self._encryption_module = Salsa20
+        elif self._encryption in (EncryptionType.CHACHA_20_ORIGINAL,
+                                  EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.XCHACHA_20):
+            self._encryption_module = ChaCha20
 
-        if encryption_module:
-            for possible_block_size in [k for k in getattr(encryption_module, &#39;key_size&#39;) if k % getattr(encryption_module, &#39;block_size&#39;, 1) == 0]:
+
+        if self._encryption_module :
+            for possible_block_size in [k for k in _coerce_to_list(getattr(self._encryption_module , &#39;key_size&#39;)) if k % getattr(self._encryption_module , &#39;block_size&#39;, 1) == 0]:
                 if len(self._password) &lt;= possible_block_size:
                     self._encryption_block_size = possible_block_size
                     self._password = _repeat_to_length(self._password, self._encryption_block_size)
                     break
             else:
-                raise ValueError(f&#34;For {encryption.name} encryption, the password was too long. It could not fit in a supported key size. Max key size: {max(AES.key_size)}. It&#39;s size was: {len(self._password)}.&#34;)
+                raise ValueError(f&#34;For {encryption.name} encryption, the password was too long. It could not fit in a supported key size. Max key size: {max(self._encryption_module.key_size)}. It&#39;s size was: {len(self._password)}.&#34;)
 
         # this must be done after self._password is fully setup
         if self._encryption == EncryptionType.AES_ECB:
@@ -419,6 +480,20 @@ pickle_module: The serialization module to use. Must have .dumps and .loads meth
         &#39;&#39;&#39; Takes in the given data field and with raise TypeError if it is not a bytes object &#39;&#39;&#39;
         if not isinstance(data, bytes):
             raise TypeError(f&#34;data should be of type bytes. It is of type: {type(data)}&#34;)
+
+    def _get_nonce_length(self) -&gt; typing.Optional[int]:
+        &#39;&#39;&#39; Uses self._encryption to figure out the nonce size &#39;&#39;&#39;
+        nonce_length = None
+        if self._encryption == EncryptionType.SALSA_20:
+            nonce_length = 8
+        elif self._encryption == EncryptionType.CHACHA_20_ORIGINAL:
+            nonce_length = 8
+        elif self._encryption == EncryptionType.CHACHA_20_TLS:
+            nonce_length = 12
+        elif self._encryption == EncryptionType.XCHACHA_20:
+            nonce_length = 24
+
+        return nonce_length
 
     def _encrypt(self, data:bytes) -&gt; bytes:
         &#39;&#39;&#39;
@@ -434,6 +509,12 @@ pickle_module: The serialization module to use. Must have .dumps and .loads meth
         elif self._encryption == EncryptionType.SALSA_20:
             cipher = Salsa20.new(key=self._password)
             data = cipher.nonce + cipher.encrypt(data)
+        elif self._encryption in (EncryptionType.CHACHA_20_ORIGINAL,
+                                  EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.XCHACHA_20):
+            nonce = get_random_bytes(self._get_nonce_length())
+            cipher = ChaCha20.new(key=self._password, nonce=nonce)
+            data = nonce + cipher.encrypt(data)
         else:
             raise ValueError(f&#34;Unsupported encryption type: {self._encryption}&#34;)
         return data
@@ -449,10 +530,14 @@ pickle_module: The serialization module to use. Must have .dumps and .loads meth
             pass
         elif self._encryption == EncryptionType.AES_ECB:
             data = unpad(self._aes.decrypt(data), self._encryption_block_size)
-        elif self._encryption == EncryptionType.SALSA_20:
-            nonce = data[:8]
-            secret = data[8:]
-            data = Salsa20.new(self._password, nonce).decrypt(secret)
+        elif self._encryption in (EncryptionType.SALSA_20,
+                                  EncryptionType.CHACHA_20_ORIGINAL,
+                                  EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.XCHACHA_20):
+            nonce_length = self._get_nonce_length()
+            nonce = data[:nonce_length]
+            secret = data[nonce_length:]
+            data = self._encryption_module.new(key=self._password, nonce=nonce).decrypt(secret)
         else:
             raise ValueError(f&#34;Unsupported encryption type: {self._encryption}&#34;)
         return data
@@ -626,10 +711,13 @@ Returns the encrypted/compressed/serialized data.</p></div>
 </li>
 <li>
 <h4><code><a title="picklecryptor.picklecryptor.EncryptionType" href="#picklecryptor.picklecryptor.EncryptionType">EncryptionType</a></code></h4>
-<ul class="">
+<ul class="two-column">
 <li><code><a title="picklecryptor.picklecryptor.EncryptionType.AES_ECB" href="#picklecryptor.picklecryptor.EncryptionType.AES_ECB">AES_ECB</a></code></li>
+<li><code><a title="picklecryptor.picklecryptor.EncryptionType.CHACHA_20_ORIGINAL" href="#picklecryptor.picklecryptor.EncryptionType.CHACHA_20_ORIGINAL">CHACHA_20_ORIGINAL</a></code></li>
+<li><code><a title="picklecryptor.picklecryptor.EncryptionType.CHACHA_20_TLS" href="#picklecryptor.picklecryptor.EncryptionType.CHACHA_20_TLS">CHACHA_20_TLS</a></code></li>
 <li><code><a title="picklecryptor.picklecryptor.EncryptionType.NONE" href="#picklecryptor.picklecryptor.EncryptionType.NONE">NONE</a></code></li>
 <li><code><a title="picklecryptor.picklecryptor.EncryptionType.SALSA_20" href="#picklecryptor.picklecryptor.EncryptionType.SALSA_20">SALSA_20</a></code></li>
+<li><code><a title="picklecryptor.picklecryptor.EncryptionType.XCHACHA_20" href="#picklecryptor.picklecryptor.EncryptionType.XCHACHA_20">XCHACHA_20</a></code></li>
 </ul>
 </li>
 <li>
