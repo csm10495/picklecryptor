@@ -9,7 +9,7 @@ import pickle
 import typing
 import zlib
 
-from Crypto.Cipher import AES, ChaCha20, Salsa20
+from Crypto.Cipher import AES, ChaCha20, ChaCha20_Poly1305, Salsa20
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 
@@ -21,6 +21,9 @@ class EncryptionType(enum.Enum):
     CHACHA_20_ORIGINAL = enum.auto()
     CHACHA_20_TLS = enum.auto()
     XCHACHA_20 = enum.auto()
+    CHACHA_20_POLY_1305_ORIGINAL = enum.auto()
+    CHACHA_20_POLY_1305_TLS = enum.auto()
+    XCHACHA_20_POLY_1305 = enum.auto()
 
 class CompressionType(enum.Enum):
     ''' Enum representing the types of compression PickleCryptor can perform '''
@@ -84,7 +87,10 @@ class PickleCryptor:
                                   EncryptionType.CHACHA_20_TLS,
                                   EncryptionType.XCHACHA_20):
             self._encryption_module = ChaCha20
-
+        elif self._encryption in (EncryptionType.CHACHA_20_POLY_1305_ORIGINAL,
+                                  EncryptionType.CHACHA_20_POLY_1305_TLS,
+                                  EncryptionType.XCHACHA_20_POLY_1305):
+            self._encryption_module = ChaCha20_Poly1305
 
         if self._encryption_module :
             for possible_block_size in [k for k in _coerce_to_list(getattr(self._encryption_module , 'key_size')) if k % getattr(self._encryption_module , 'block_size', 1) == 0]:
@@ -107,13 +113,15 @@ class PickleCryptor:
     def _get_nonce_length(self) -> typing.Optional[int]:
         ''' Uses self._encryption to figure out the nonce size '''
         nonce_length = None
-        if self._encryption == EncryptionType.SALSA_20:
+        if self._encryption in (EncryptionType.SALSA_20,
+                                EncryptionType.CHACHA_20_ORIGINAL,
+                                EncryptionType.CHACHA_20_POLY_1305_ORIGINAL):
             nonce_length = 8
-        elif self._encryption == EncryptionType.CHACHA_20_ORIGINAL:
-            nonce_length = 8
-        elif self._encryption == EncryptionType.CHACHA_20_TLS:
+        elif self._encryption in (EncryptionType.CHACHA_20_TLS,
+                                  EncryptionType.CHACHA_20_POLY_1305_TLS):
             nonce_length = 12
-        elif self._encryption == EncryptionType.XCHACHA_20:
+        elif self._encryption in (EncryptionType.XCHACHA_20,
+                                  EncryptionType.XCHACHA_20_POLY_1305):
             nonce_length = 24
 
         return nonce_length
@@ -130,14 +138,21 @@ class PickleCryptor:
         elif self._encryption == EncryptionType.AES_ECB:
             data =self._aes.encrypt(pad(data, self._encryption_block_size))
         elif self._encryption == EncryptionType.SALSA_20:
-            cipher = Salsa20.new(key=self._password)
+            cipher = self._encryption_module.new(key=self._password)
             data = cipher.nonce + cipher.encrypt(data)
         elif self._encryption in (EncryptionType.CHACHA_20_ORIGINAL,
                                   EncryptionType.CHACHA_20_TLS,
                                   EncryptionType.XCHACHA_20):
             nonce = get_random_bytes(self._get_nonce_length())
-            cipher = ChaCha20.new(key=self._password, nonce=nonce)
+            cipher = self._encryption_module.new(key=self._password, nonce=nonce)
             data = nonce + cipher.encrypt(data)
+        elif self._encryption in (EncryptionType.CHACHA_20_POLY_1305_ORIGINAL,
+                                  EncryptionType.CHACHA_20_POLY_1305_TLS,
+                                  EncryptionType.XCHACHA_20_POLY_1305):
+            nonce = get_random_bytes(self._get_nonce_length())
+            cipher = self._encryption_module.new(key=self._password, nonce=nonce)
+            secret, mac = cipher.encrypt_and_digest(data)
+            data = nonce + mac + secret
         else:
             raise ValueError(f"Unsupported encryption type: {self._encryption}")
         return data
@@ -161,6 +176,15 @@ class PickleCryptor:
             nonce = data[:nonce_length]
             secret = data[nonce_length:]
             data = self._encryption_module.new(key=self._password, nonce=nonce).decrypt(secret)
+        elif self._encryption in (EncryptionType.CHACHA_20_POLY_1305_ORIGINAL,
+                                  EncryptionType.CHACHA_20_POLY_1305_TLS,
+                                  EncryptionType.XCHACHA_20_POLY_1305):
+            nonce_length = self._get_nonce_length()
+            nonce = data[:nonce_length]
+            remainder = data[nonce_length:]
+            mac = remainder[:16]
+            secret = remainder[16:]
+            data = self._encryption_module.new(key=self._password, nonce=nonce).decrypt_and_verify(secret, mac)
         else:
             raise ValueError(f"Unsupported encryption type: {self._encryption}")
         return data
